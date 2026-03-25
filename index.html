@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pendulum Measurement</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 20px; }
+  h1 { text-align: center; }
+  .controls { margin-bottom: 20px; text-align: center; }
+  label { display: block; margin-top: 10px; }
+  .measurements { text-align: center; margin-bottom: 20px; }
+  .measurements label { display: inline-block; margin-right: 20px; margin-top: 0; }
+  input { margin-left: 10px; }
+  button { margin: 5px; padding: 8px 12px; }
+  #chart { width: 100%; height: 300px; }
+</style>
+</head>
+<body>
+<h1>Pendulum Measurement</h1>
+
+<div class="controls">
+  <button id="connectBtn">Connect Micro:bit</button>
+  <button id="startBtn">Start Measurement</button>
+  <button id="exportBtn">Export to Excel</button>
+</div>
+
+<div class="measurements">
+  <label>Mass (g): <input type="number" id="massInput"></label>
+  <label>Length (cm): <input type="number" id="lengthInput"></label>
+  <label>Measurement Time (s): <input type="number" id="timeInput"></label>
+</div>
+
+<canvas id="chart"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs/dist/exceljs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/file-saver/dist/FileSaver.min.js"></script>
+
+<script>
+let device, server, accelService, accelChar;
+let chart, chartData = [];
+let measurements = []; // store multiple runs
+let measuring = false;
+let armed = false;     // armed but waiting for bottom
+let startTime = null;
+let measurementDuration = 0;
+
+// UUIDs for micro:bit accelerometer
+const ACCEL_SERVICE_UUID = 'e95d0753-251d-470a-a062-fa1922dfa9a8';
+const ACCEL_CHAR_UUID    = 'e95dca4b-251d-470a-a062-fa1922dfa9a8';
+
+// Setup chart
+function initChart() {
+  const ctx = document.getElementById('chart').getContext('2d');
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Amplitude (cm)',
+        data: [],
+        borderColor: 'blue',
+        fill: false
+      }]
+    },
+    options: {
+      animation: false,
+      scales: {
+        x: { title: { display: true, text: 'Time (s)' } },
+        y: { title: { display: true, text: 'Amplitude (cm)' } }
+      }
+    }
+  });
+}
+initChart();
+
+// Connect to micro:bit
+document.getElementById('connectBtn').onclick = async () => {
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'BBC micro:bit' }],
+      optionalServices: [ACCEL_SERVICE_UUID]
+    });
+    server = await device.gatt.connect();
+    accelService = await server.getPrimaryService(ACCEL_SERVICE_UUID);
+    accelChar = await accelService.getCharacteristic(ACCEL_CHAR_UUID);
+    await accelChar.startNotifications();
+    accelChar.addEventListener('characteristicvaluechanged', handleAccel);
+    alert('Connected to micro:bit!');
+  } catch (err) {
+    console.error(err);
+    alert('Connection failed: ' + err);
+  }
+};
+
+// Handle accelerometer data
+function handleAccel(event) {
+  const dv = event.target.value;
+  const x = dv.getInt16(0, true);
+  const y = dv.getInt16(2, true);
+  const z = dv.getInt16(4, true);
+
+  const amplitude = x / 100; // rough conversion to cm
+  const now = Date.now();
+
+  // If armed but not yet measuring, wait for bottom crossing
+  if (armed && !measuring) {
+    if (Math.abs(amplitude) < 0.5) { // threshold near zero
+      measuring = true;
+      startTime = now;
+      chartData = [];
+      chart.data.labels = [];
+      chart.data.datasets[0].data = [];
+      chart.update();
+      console.log("Pendulum bottom detected, measurement started");
+    }
+  }
+
+  if (measuring) {
+    const elapsed = (now - startTime) / 1000;
+    chart.data.labels.push(elapsed.toFixed(2));
+    chart.data.datasets[0].data.push(amplitude);
+    chart.update();
+
+    chartData.push({ time: elapsed, amplitude });
+
+    if (elapsed >= measurementDuration) {
+      measuring = false;
+      armed = false;
+      // Save run with metadata
+      const mass = document.getElementById('massInput').value;
+      const length = document.getElementById('lengthInput').value;
+      measurements.push({ data: chartData, mass, length });
+      chartData = [];
+      alert('Measurement finished!');
+    }
+  }
+}
+
+// Arm measurement
+document.getElementById('startBtn').onclick = () => {
+  const mass = parseFloat(document.getElementById('massInput').value);
+  const length = parseFloat(document.getElementById('lengthInput').value);
+  measurementDuration = parseFloat(document.getElementById('timeInput').value);
+
+  if (!mass || !length || !measurementDuration) {
+    alert('Please enter mass, length, and time.');
+    return;
+  }
+
+  armed = true;
+  measuring = false;
+  alert('Armed: waiting for pendulum to hit bottom (amplitude ≈ 0).');
+};
+
+// Export to Excel
+document.getElementById('exportBtn').onclick = async () => {
+  if (measurements.length === 0) {
+    alert('No measurements to export.');
+    return;
+  }
+  const workbook = new ExcelJS.Workbook();
+  measurements.forEach((run, idx) => {
+    const sheetName = `Measurement ${idx+1} (M${run.mass}g L${run.length}cm)`;
+    const sheet = workbook.addWorksheet(sheetName);
+    sheet.columns = [
+      { header: 'Time (s)', key: 'time', width: 15 },
+      { header: 'Amplitude (cm)', key: 'amplitude', width: 20 }
+    ];
+    run.data.forEach(row => sheet.addRow(row));
+  });
+  const buf = await workbook.xlsx.writeBuffer();
+  saveAs(new Blob([buf]), 'pendulum_measurements.xlsx');
+  measurements = []; // clear after export
+  alert('Exported and cleared measurements.');
+};
+</script>
+</body>
+</html>
