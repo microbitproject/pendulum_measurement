@@ -28,6 +28,7 @@
   <label>Mass (g): <input type="number" id="massInput"></label>
   <label>Length (cm): <input type="number" id="lengthInput"></label>
   <label>Measurement Time (s): <input type="number" id="timeInput"></label>
+  <label>Angle (deg): <span id="angleDisplay">0</span></label>
 </div>
 
 <canvas id="chart"></canvas>
@@ -44,6 +45,7 @@ let measuring = false;
 let armed = false;     // armed but waiting for bottom
 let startTime = null;
 let measurementDuration = 0;
+let initialAngle = 0;
 
 // UUIDs for micro:bit accelerometer
 const ACCEL_SERVICE_UUID = 'e95d0753-251d-470a-a062-fa1922dfa9a8';
@@ -101,6 +103,11 @@ function handleAccel(event) {
   const z = dv.getInt16(4, true);
 
   const amplitude = x / 100; // rough conversion to cm
+  let angle = Math.atan2(x, z) * 180 / Math.PI; // angle in degrees
+  if (angle > 90) angle = 180 - angle;
+  else if (angle < -90) angle = -180 - angle;
+  angle = Math.round(angle);
+  document.getElementById('angleDisplay').textContent = angle;
   const now = Date.now();
 
   // If armed but not yet measuring, wait for bottom crossing
@@ -130,7 +137,7 @@ function handleAccel(event) {
       // Save run with metadata
       const mass = document.getElementById('massInput').value;
       const length = document.getElementById('lengthInput').value;
-      measurements.push({ data: chartData, mass, length });
+      measurements.push({ data: chartData, mass, length, angle: initialAngle });
       chartData = [];
       alert('Measurement finished!');
     }
@@ -150,6 +157,7 @@ document.getElementById('startBtn').onclick = () => {
 
   armed = true;
   measuring = false;
+  initialAngle = parseInt(document.getElementById('angleDisplay').textContent);
   alert('Armed: waiting for pendulum to hit bottom (amplitude ≈ 0).');
 };
 
@@ -161,7 +169,7 @@ document.getElementById('exportBtn').onclick = async () => {
   }
   const workbook = new ExcelJS.Workbook();
   measurements.forEach((run, idx) => {
-    const sheetName = `Measurement ${idx+1} (M${run.mass}g L${run.length}cm)`;
+    const sheetName = `Measurement ${idx+1} (M${run.mass}g L${run.length}cm A${run.angle}deg)`;
     const sheet = workbook.addWorksheet(sheetName);
     sheet.columns = [
       { header: 'Time (s)', key: 'time', width: 15 },
