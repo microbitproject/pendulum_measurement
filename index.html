@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>Pendulum Measurement</title>
 <style>
-  body { font-family: Arial, sans-serif; margin: 20px; }
+  body { font-family: Arial, sans-serif; margin: 20px; display: flex; flex-direction: column; height: 100vh; }
   h1 { text-align: center; }
   .controls { margin-bottom: 20px; text-align: center; }
   label { display: block; margin-top: 10px; }
@@ -12,7 +12,7 @@
   .measurements label { display: inline-block; margin-right: 20px; margin-top: 0; }
   input { margin-left: 10px; }
   button { margin: 5px; padding: 8px 12px; }
-  #chart { width: 100%; height: 300px; }
+  #chart { width: 100%; flex: 1; }
 </style>
 </head>
 <body>
@@ -26,9 +26,10 @@
 
 <div class="measurements">
   <label>Mass (g): <input type="number" id="massInput"></label>
-  <label>Length (cm): <input type="number" id="lengthInput"></label>
+  <label>Length (cm): <input type="number" id="lengthInput" onchange="updatePeriod()"></label>
   <label>Measurement Time (s): <input type="number" id="timeInput"></label>
   <label>Angle (deg): <span id="angleDisplay">0</span></label>
+  <label>Period (s): <span id="periodDisplay">0.00</span></label>
 </div>
 
 <canvas id="chart"></canvas>
@@ -40,18 +41,28 @@
 <script>
 let device, server, accelService, accelChar;
 let chart, chartData = [];
-let measurements = []; // store multiple runs
+let measurements = [];
 let measuring = false;
-let armed = false;     // armed but waiting for bottom
+let armed = false;
 let startTime = null;
 let measurementDuration = 0;
 let initialAngle = 0;
 
-// UUIDs for micro:bit accelerometer
 const ACCEL_SERVICE_UUID = 'e95d0753-251d-470a-a062-fa1922dfa9a8';
 const ACCEL_CHAR_UUID    = 'e95dca4b-251d-470a-a062-fa1922dfa9a8';
 
-// Setup chart
+function updatePeriod() {
+  const lengthCm = parseFloat(document.getElementById('lengthInput').value) || 0;
+  if (lengthCm > 0) {
+    const lengthM = lengthCm / 100;
+    const g = 9.81;
+    const period = 2 * Math.PI * Math.sqrt(lengthM / g);
+    document.getElementById('periodDisplay').textContent = period.toFixed(2);
+  } else {
+    document.getElementById('periodDisplay').textContent = '0.00';
+  }
+}
+
 function initChart() {
   const ctx = document.getElementById('chart').getContext('2d');
   chart = new Chart(ctx, {
@@ -71,12 +82,20 @@ function initChart() {
         x: { title: { display: true, text: 'Time (s)' } },
         y: {
           title: { display: true, text: 'Amplitude (cm)' },
-          min: -1,
-          max: 1,
-          beginAtZero: true,
-          ticks: { stepSize: 0.5 },
-          grid: {
-            color: function(context) { return context.tick.value === 0 ? 'black' : '#e9e9e9'; }
+          min: -1000,
+          max: 1000,
+          beginAtZero: false,
+          ticks: {
+            stepSize: 500,
+            callback: (value) => Number(value).toFixed(0)
+          },
+          grid: { color: '#e9e9e9' }
+        }
+      },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            label: (context) => `Amplitude: ${Number(context.parsed.y).toFixed(0)} cm`
           }
         }
       }
@@ -85,7 +104,6 @@ function initChart() {
 }
 initChart();
 
-// Connect to micro:bit
 document.getElementById('connectBtn').onclick = async () => {
   try {
     device = await navigator.bluetooth.requestDevice({
@@ -104,38 +122,38 @@ document.getElementById('connectBtn').onclick = async () => {
   }
 };
 
-// Handle accelerometer data
 function handleAccel(event) {
   const dv = event.target.value;
   const x = dv.getInt16(0, true);
   const y = dv.getInt16(2, true);
   const z = dv.getInt16(4, true);
 
-  let rawAngle = Math.atan2(x, z) * 180 / Math.PI; // raw angle from accelerometer
-  if (rawAngle > 90) rawAngle = 180 - rawAngle;
-  else if (rawAngle < -90) rawAngle = -180 - rawAngle;
-  const angle = Math.round(rawAngle);
+  // ✅ ISPRAVKA: saturacija pre asin da se uklone duple oscilacije
+  const normalized = Math.max(-1, Math.min(1, (y - 1088) / 1024));
+  const rawAngle = Math.asin(normalized) * 180 / Math.PI;
+
+  const angle = Math.round(Math.abs(rawAngle));
   document.getElementById('angleDisplay').textContent = angle;
 
   const lengthInput = parseFloat(document.getElementById('lengthInput').value) || 0;
   let amplitude = 0;
   if (lengthInput > 0) {
-    amplitude = lengthInput * -Math.sin(rawAngle * Math.PI / 180); // signed, adjusted for orientation
+    amplitude = lengthInput * Math.sin(rawAngle * Math.PI / 180);
   } else {
-    amplitude = x / 100; // fallback
+    amplitude = (y - 1088) / 10;
   }
+
   const now = Date.now();
 
-  // If armed but not yet measuring, wait for bottom crossing
   if (armed && !measuring) {
-    if (Math.abs(amplitude) < 0.5) { // threshold near zero
+    if (Math.abs(y - 1088) < 100) {
       measuring = true;
       startTime = now;
       chartData = [];
       chart.data.labels = [];
       chart.data.datasets[0].data = [];
       chart.update();
-      console.log("Pendulum bottom detected, measurement started");
+      console.log("Pendulum top detected, measurement started");
     }
   }
 
@@ -150,7 +168,6 @@ function handleAccel(event) {
     if (elapsed >= measurementDuration) {
       measuring = false;
       armed = false;
-      // Save run with metadata
       const mass = document.getElementById('massInput').value;
       const length = document.getElementById('lengthInput').value;
       measurements.push({ data: chartData, mass, length, angle: initialAngle });
@@ -160,7 +177,6 @@ function handleAccel(event) {
   }
 }
 
-// Arm measurement
 document.getElementById('startBtn').onclick = () => {
   const mass = parseFloat(document.getElementById('massInput').value);
   const length = parseFloat(document.getElementById('lengthInput').value);
@@ -173,19 +189,22 @@ document.getElementById('startBtn').onclick = () => {
 
   armed = true;
   measuring = false;
-  initialAngle = parseInt(document.getElementById('angleDisplay').textContent);
+  initialAngle = 0;
+
   if (length > 0) {
-    chart.options.scales.y.min = -length;
-    chart.options.scales.y.max = length;
+    const verticalRange = length * 1.1;
+    chart.options.scales.y.min = -verticalRange;
+    chart.options.scales.y.max = verticalRange;
     chart.options.scales.y.ticks = {
-      stepSize: Math.max(1, Math.round(length / 10))
+      stepSize: Math.max(1, Math.round(length / 10)),
+      callback: (value) => Number(value).toFixed(0)
     };
     chart.update();
   }
-  alert('Armed: waiting for pendulum to hit bottom (amplitude ≈ 0).');
+
+  alert('Armed: waiting for pendulum to reach the bottom');
 };
 
-// Export to Excel
 document.getElementById('exportBtn').onclick = async () => {
   if (measurements.length === 0) {
     alert('No measurements to export.');
@@ -193,7 +212,7 @@ document.getElementById('exportBtn').onclick = async () => {
   }
   const workbook = new ExcelJS.Workbook();
   measurements.forEach((run, idx) => {
-    const sheetName = `Measurement ${idx+1} (M${run.mass}g L${run.length}cm A${run.angle}deg)`;
+    const sheetName = `Measurement ${idx+1} (M${run.mass}g L${run.length}cm A${run.angle}cm)`;
     const sheet = workbook.addWorksheet(sheetName);
     sheet.columns = [
       { header: 'Time (s)', key: 'time', width: 15 },
@@ -203,7 +222,7 @@ document.getElementById('exportBtn').onclick = async () => {
   });
   const buf = await workbook.xlsx.writeBuffer();
   saveAs(new Blob([buf]), 'pendulum_measurements.xlsx');
-  measurements = []; // clear after export
+  measurements = [];
   alert('Exported and cleared measurements.');
 };
 </script>
